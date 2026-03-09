@@ -34,6 +34,23 @@ Text inside `<internal>` tags is logged but not sent to the user. If you've alre
 
 When working as a sub-agent or teammate, only use `send_message` if instructed to by the main agent.
 
+## Google Calendar
+
+You have access to Google Calendar tools (prefixed `mcp__google-calendar__`):
+
+- `list-calendars` — Show all accessible calendars
+- `list-events` — Get events with date filtering
+- `get-event` — Fetch event details by ID
+- `search-events` — Search events by text
+- `create-event` — Create new events (supports recurring)
+- `update-event` — Modify existing events
+- `delete-event` — Remove events
+- `respond-to-event` — Accept/decline invitations
+- `get-freebusy` — Check availability
+- `get-current-time` — Get current time in calendar timezone
+
+When users ask about their schedule, upcoming events, or want to create/modify calendar events, use these tools.
+
 ## Your Workspace
 
 Files you create are saved in `/workspace/group/`. Use this for notes, research, or anything that should persist.

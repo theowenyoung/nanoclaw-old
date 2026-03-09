@@ -197,6 +197,16 @@ function buildVolumeMounts(
     readonly: false,
   });
 
+  // Google Calendar credentials and tokens (shared across all groups)
+  const googleCalDir = path.join(DATA_DIR, 'google-calendar');
+  if (fs.existsSync(googleCalDir)) {
+    mounts.push({
+      hostPath: googleCalDir,
+      containerPath: '/workspace/google-calendar',
+      readonly: false,
+    });
+  }
+
   // Additional mounts validated against external allowlist (tamper-proof from containers)
   if (group.containerConfig?.additionalMounts) {
     const validatedMounts = validateAdditionalMounts(
