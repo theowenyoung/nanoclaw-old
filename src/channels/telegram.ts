@@ -1,6 +1,9 @@
+import fs from 'fs';
+import path from 'path';
+
 import { Api, Bot } from 'grammy';
 
-import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { ASSISTANT_NAME, DATA_DIR, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -119,6 +122,14 @@ export class TelegramChannel implements Channel {
 
   async connect(): Promise<void> {
     this.bot = new Bot(this.botToken);
+
+    // Delete any existing webhook to avoid 409 conflicts when restarting while
+    // Telegram still holds the previous long-poll connection open.
+    try {
+      await this.bot.api.deleteWebhook({ drop_pending_updates: false });
+    } catch (err) {
+      logger.debug({ err }, 'deleteWebhook on connect (ignored)');
+    }
 
     // Command to get chat ID (useful for registration)
     this.bot.command('chatid', (ctx) => {
@@ -253,7 +264,59 @@ export class TelegramChannel implements Channel {
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
+    this.bot.on('message:photo', async (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      const group = this.opts.registeredGroups()[chatJid];
+      if (!group) return;
+
+      const timestamp = new Date(ctx.message.date * 1000).toISOString();
+      const senderName =
+        ctx.from?.first_name ||
+        ctx.from?.username ||
+        ctx.from?.id?.toString() ||
+        'Unknown';
+      const msgId = ctx.message.message_id.toString();
+      const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
+
+      const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+
+      let mediaPath: string | undefined;
+      let mediaMimeType: string | undefined;
+      try {
+        const photos = ctx.message.photo as Array<{ file_id: string }>;
+        const bestPhoto = photos[photos.length - 1];
+        const file = await ctx.api.getFile(bestPhoto.file_id);
+        if (file.file_path) {
+          const safeJid = chatJid.replace(/[^a-zA-Z0-9_-]/g, '_');
+          const mediaDir = path.join(DATA_DIR, 'media', safeJid);
+          fs.mkdirSync(mediaDir, { recursive: true });
+          const filePath = path.join(mediaDir, `${msgId}.jpg`);
+          const url = `https://api.telegram.org/file/bot${this.botToken}/${file.file_path}`;
+          const response = await fetch(url);
+          if (response.ok) {
+            const buffer = Buffer.from(await response.arrayBuffer());
+            fs.writeFileSync(filePath, buffer);
+            mediaPath = path.join('media', safeJid, `${msgId}.jpg`);
+            mediaMimeType = 'image/jpeg';
+          }
+        }
+      } catch (err) {
+        logger.warn({ err, msgId, chatJid }, 'Failed to download Telegram photo, using placeholder');
+      }
+
+      this.opts.onMessage(chatJid, {
+        id: msgId,
+        chat_jid: chatJid,
+        sender: ctx.from?.id?.toString() || '',
+        sender_name: senderName,
+        content: `[Photo]${caption}`,
+        timestamp,
+        is_from_me: false,
+        mediaPath,
+        mediaMimeType,
+      });
+    });
     this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
     this.bot.on('message:voice', (ctx) => storeNonText(ctx, '[Voice message]'));
     this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));

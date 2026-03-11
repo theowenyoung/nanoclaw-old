@@ -41,6 +41,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  media?: Array<{ containerPath: string; mimeType: string }>;
 }
 
 export interface ContainerOutput {
@@ -206,6 +207,16 @@ function buildVolumeMounts(
       hostPath: googleCalDir,
       containerPath: '/workspace/google-calendar',
       readonly: false,
+    });
+  }
+
+  // Media directory: downloaded photos shared across all groups
+  const mediaDir = path.join(DATA_DIR, 'media');
+  if (fs.existsSync(mediaDir)) {
+    mounts.push({
+      hostPath: mediaDir,
+      containerPath: '/workspace/media',
+      readonly: true,
     });
   }
 
