@@ -13,6 +13,10 @@ CONTAINER_RUNTIME="${CONTAINER_RUNTIME:-docker}"
 echo "Building NanoClaw agent container image..."
 echo "Image: ${IMAGE_NAME}:${TAG}"
 
+# Prune buildkit cache to ensure COPY steps pick up changed files.
+# Without this, stale layers can persist even with --no-cache.
+${CONTAINER_RUNTIME} builder prune -af >/dev/null 2>&1 || true
+
 ${CONTAINER_RUNTIME} build -t "${IMAGE_NAME}:${TAG}" .
 
 echo ""

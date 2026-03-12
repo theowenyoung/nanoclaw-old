@@ -51,7 +51,7 @@ export interface NewMessage {
   timestamp: string;
   is_from_me?: boolean;
   is_bot_message?: boolean;
-  mediaPath?: string;     // Relative path under DATA_DIR (e.g. "media/tg_-123/456.jpg")
+  mediaPath?: string; // Relative path under DATA_DIR (e.g. "media/tg_-123/456.jpg")
   mediaMimeType?: string; // MIME type (e.g. "image/jpeg")
 }
 

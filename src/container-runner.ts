@@ -242,6 +242,9 @@ function buildContainerArgs(
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
 
+  // Enable agent teams (subagent orchestration) as a process-level env var
+  args.push('-e', 'CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1');
+
   // Route API traffic through the credential proxy (containers never see real secrets)
   args.push(
     '-e',

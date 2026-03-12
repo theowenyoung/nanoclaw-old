@@ -106,6 +106,7 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  onResetSession?: (chatJid: string) => void;
 }
 
 export class TelegramChannel implements Channel {
@@ -149,6 +150,13 @@ export class TelegramChannel implements Channel {
     // Command to check bot status
     this.bot.command('ping', (ctx) => {
       ctx.reply(`${ASSISTANT_NAME} is online.`);
+    });
+
+    // Command to reset session (start fresh conversation)
+    this.bot.command('new', (ctx) => {
+      const chatJid = `tg:${ctx.chat.id}`;
+      this.opts.onResetSession?.(chatJid);
+      ctx.reply('New conversation started.');
     });
 
     this.bot.on('message:text', async (ctx) => {
@@ -278,8 +286,15 @@ export class TelegramChannel implements Channel {
       const msgId = ctx.message.message_id.toString();
       const caption = ctx.message.caption ? ` ${ctx.message.caption}` : '';
 
-      const isGroup = ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
-      this.opts.onChatMetadata(chatJid, timestamp, undefined, 'telegram', isGroup);
+      const isGroup =
+        ctx.chat.type === 'group' || ctx.chat.type === 'supergroup';
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        undefined,
+        'telegram',
+        isGroup,
+      );
 
       let mediaPath: string | undefined;
       let mediaMimeType: string | undefined;
@@ -302,7 +317,10 @@ export class TelegramChannel implements Channel {
           }
         }
       } catch (err) {
-        logger.warn({ err, msgId, chatJid }, 'Failed to download Telegram photo, using placeholder');
+        logger.warn(
+          { err, msgId, chatJid },
+          'Failed to download Telegram photo, using placeholder',
+        );
       }
 
       this.opts.onMessage(chatJid, {

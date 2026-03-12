@@ -57,6 +57,8 @@ interface SDKUserMessage {
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
 const IPC_POLL_MS = 500;
+const TEAM_INBOX_POLL_MS = 2000;
+const TEAM_BASE_DIR = path.join(process.env.HOME || '/home/node', '.claude', 'teams');
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -259,6 +261,77 @@ function formatTranscriptMarkdown(messages: ParsedMessage[], title?: string | nu
 }
 
 /**
+ * Find the active team name by scanning team directories for the current session.
+ */
+function findTeamName(sessionId: string): string | null {
+  if (!fs.existsSync(TEAM_BASE_DIR)) return null;
+  try {
+    for (const dir of fs.readdirSync(TEAM_BASE_DIR)) {
+      const configPath = path.join(TEAM_BASE_DIR, dir, 'config.json');
+      if (!fs.existsSync(configPath)) continue;
+      try {
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        if (config.leadSessionId === sessionId) return dir;
+      } catch { /* skip */ }
+    }
+  } catch { /* skip */ }
+  return null;
+}
+
+interface TeammateMessage {
+  from: string;
+  text: string;
+  timestamp: string;
+  color?: string;
+  summary?: string;
+  read: boolean;
+}
+
+/**
+ * Read unread messages from team-lead inbox and mark them as read.
+ * Returns formatted teammate-message blocks for injection into the stream.
+ */
+function drainTeamInbox(teamName: string): string | null {
+  const inboxPath = path.join(TEAM_BASE_DIR, teamName, 'inboxes', 'team-lead.json');
+  if (!fs.existsSync(inboxPath)) return null;
+
+  try {
+    const messages: TeammateMessage[] = JSON.parse(fs.readFileSync(inboxPath, 'utf-8'));
+    const unread = messages.filter(m => !m.read);
+    if (unread.length === 0) return null;
+
+    // Filter out idle_notification JSON messages — only pass real content
+    const contentMessages = unread.filter(m => {
+      try {
+        const parsed = JSON.parse(m.text);
+        return parsed.type !== 'idle_notification';
+      } catch { return true; }
+    });
+
+    if (contentMessages.length === 0) {
+      // Only idle notifications — still mark as read
+      for (const m of messages) m.read = true;
+      fs.writeFileSync(inboxPath, JSON.stringify(messages, null, 2));
+      return null;
+    }
+
+    // Mark all as read
+    for (const m of messages) m.read = true;
+    fs.writeFileSync(inboxPath, JSON.stringify(messages, null, 2));
+
+    // Format as teammate-message blocks (same format the CLI uses internally)
+    const formatted = contentMessages.map(m =>
+      `<teammate-message teammate_id="${m.from}"${m.color ? ` color="${m.color}"` : ''}${m.summary ? ` summary="${m.summary}"` : ''}>\n${m.text}\n</teammate-message>`
+    ).join('\n\n');
+
+    return formatted;
+  } catch (err) {
+    log(`Failed to read team inbox: ${err instanceof Error ? err.message : String(err)}`);
+    return null;
+  }
+}
+
+/**
  * Check for _close sentinel.
  */
 function shouldClose(): boolean {
@@ -365,6 +438,9 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let messageCount = 0;
   let resultCount = 0;
+  let activeTaskCount = 0;
+  let teamName: string | null = null;
+  let teamInboxPollTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
@@ -441,8 +517,9 @@ async function runQuery(
     }
   })) {
     messageCount++;
-    const msgType = message.type === 'system' ? `system/${(message as { subtype?: string }).subtype}` : message.type;
-    log(`[msg #${messageCount}] type=${msgType}`);
+    const sub = (message as { subtype?: string }).subtype;
+    const msgType = sub ? `${message.type}/${sub}` : message.type;
+    log(`[msg #${messageCount}] type=${msgType} rawType=${message.type} subtype=${sub || 'none'}`);
 
     if (message.type === 'assistant' && 'uuid' in message) {
       lastAssistantUuid = (message as { uuid: string }).uuid;
@@ -453,24 +530,68 @@ async function runQuery(
       log(`Session initialized: ${newSessionId}`);
     }
 
+    if (message.type === 'system') {
+      const sub = (message as { subtype?: string }).subtype;
+      log(`System message: subtype=${sub} keys=${Object.keys(message).join(',')}`);
+      if (sub === 'task_started') {
+        activeTaskCount++;
+        log(`Active tasks: ${activeTaskCount}`);
+      }
+    }
+
     if (message.type === 'system' && (message as { subtype?: string }).subtype === 'task_notification') {
+      activeTaskCount = Math.max(0, activeTaskCount - 1);
       const tn = message as { task_id: string; status: string; summary: string };
-      log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary}`);
+      log(`Task notification: task=${tn.task_id} status=${tn.status} summary=${tn.summary} (active tasks: ${activeTaskCount})`);
     }
 
     if (message.type === 'result') {
       resultCount++;
       const textResult = 'result' in message ? (message as { result?: string }).result : null;
-      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''}`);
+      log(`Result #${resultCount}: subtype=${message.subtype}${textResult ? ` text=${textResult.slice(0, 200)}` : ''} (active tasks: ${activeTaskCount})`);
       writeOutput({
         status: 'success',
         result: textResult || null,
         newSessionId
       });
+
+      // Agent Teams workaround: The CLI's headless mode has a deadlock where the
+      // agent loop generator (zEq) won't exit while teammates are active, but the
+      // post-result team polling code can't run until zEq exits. We break this
+      // deadlock by reading the team-lead inbox ourselves and injecting the messages.
+      if (activeTaskCount > 0 && newSessionId) {
+        // Discover team name once
+        if (!teamName) {
+          teamName = findTeamName(newSessionId);
+          if (teamName) log(`Found team: ${teamName}`);
+          else log(`No team found for session ${newSessionId}`);
+        }
+
+        if (teamName) {
+          // Cancel any previous poll timer
+          if (teamInboxPollTimer) clearTimeout(teamInboxPollTimer);
+
+          const pollTeamInbox = () => {
+            const formatted = drainTeamInbox(teamName!);
+            if (formatted) {
+              log(`Injecting teammate messages into stream`);
+              stream.push(formatted);
+              // Stop polling — the leader will process these and produce the next result,
+              // which will restart polling if needed.
+              teamInboxPollTimer = null;
+              return;
+            }
+            teamInboxPollTimer = setTimeout(pollTeamInbox, TEAM_INBOX_POLL_MS);
+          };
+          // Wait for teammates to finish their work before first poll
+          teamInboxPollTimer = setTimeout(pollTeamInbox, TEAM_INBOX_POLL_MS);
+        }
+      }
     }
   }
 
   ipcPolling = false;
+  if (teamInboxPollTimer) clearTimeout(teamInboxPollTimer);
   log(`Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`);
   return { newSessionId, lastAssistantUuid, closedDuringQuery };
 }
