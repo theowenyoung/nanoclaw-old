@@ -545,7 +545,10 @@ async function main(): Promise<void> {
       deleteSession(group.folder);
       // Stop the active container if running
       queue.closeStdin(chatJid);
-      logger.info({ chatJid, group: group.name }, 'Session reset by /new command');
+      logger.info(
+        { chatJid, group: group.name },
+        'Session reset by /new command',
+      );
     },
   };
 
